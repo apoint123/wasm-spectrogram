@@ -59,12 +59,16 @@ pub mod core {
         fft_size: usize,
         hop_length: usize,
         num_freq_bins_to_render: usize,
-    ) -> (Vec<f32>, f32) {
+    ) -> (Vec<f32>, f32, usize) {
         let num_time_bins = if audio_data.len() >= fft_size {
             (audio_data.len() - fft_size) / hop_length + 1
         } else {
             0
         };
+        if num_time_bins == 0 {
+            return (Vec::new(), 0.0, 0);
+        }
+
         let mut flat_spectrogram = Vec::with_capacity(num_time_bins * num_freq_bins_to_render);
         let mut max_magnitude = 0.0f32;
         let mut buffer = vec![Complex::new(0.0, 0.0); fft_size];
@@ -88,7 +92,7 @@ pub mod core {
             }
             current_pos += hop_length;
         }
-        (flat_spectrogram, max_magnitude)
+        (flat_spectrogram, max_magnitude, num_time_bins)
     }
 
     pub fn apply_gain_mapping(spectrogram: &mut [f32], max_magnitude: f32, gain: f32) {
@@ -131,24 +135,14 @@ pub mod core {
         let num_freq_bins = (max_freq / freq_resolution).round() as usize;
         let num_freq_bins = num_freq_bins.min(fft_size / 2);
 
-        let (mut values, max_magnitude) =
+        let (mut values, max_magnitude, num_time_bins) =
             calculate_spectrogram(audio_data, &*fft, fft_size, hop_length, num_freq_bins);
-
-        if values.is_empty() {
-            return None;
-        }
-
-        apply_gain_mapping(&mut values, max_magnitude, gain);
-
-        let num_time_bins = if num_freq_bins > 0 {
-            values.len() / num_freq_bins
-        } else {
-            0
-        };
 
         if num_time_bins == 0 {
             return None;
         }
+
+        apply_gain_mapping(&mut values, max_magnitude, gain);
 
         Some(RenderableSpectrogram {
             values,
