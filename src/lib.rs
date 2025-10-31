@@ -3,6 +3,8 @@ use std::sync::LazyLock;
 
 pub mod core {
     use super::{Complex, Fft, FftPlanner, LazyLock};
+    #[cfg(not(target_arch = "wasm32"))]
+    use rayon::prelude::*;
 
     #[must_use]
     #[allow(clippy::many_single_char_names)]
@@ -95,11 +97,17 @@ pub mod core {
             mag = 1.0;
         }
 
-        for v in spectrogram.iter_mut() {
+        let mapping_op = |v: &mut f32| {
             let normalized_mag = *v / mag;
             let log_val = normalized_mag.mul_add(9.0, 1.0).log10();
             *v = log_val * gain;
-        }
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        spectrogram.iter_mut().for_each(mapping_op);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        spectrogram.par_iter_mut().for_each(mapping_op);
     }
 
     pub struct RenderableSpectrogram {
