@@ -1,10 +1,20 @@
-use rustfft::{Fft, FftPlanner, num_complex::Complex};
+#[cfg(target_arch = "wasm32")]
+use cfg_if::cfg_if;
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::LazyLock;
+use thiserror::Error;
 
 pub mod core {
-    use super::{Complex, Fft, FftPlanner, LazyLock};
-    #[cfg(not(target_arch = "wasm32"))]
-    use rayon::prelude::*;
+    use super::{Complex, Error, Fft, FftPlanner, LazyLock};
+    use cfg_if::cfg_if;
+
+    #[derive(Error, Debug, Clone, PartialEq, Eq)]
+    pub enum SpectrogramError {
+        #[error("Audio data is too short to produce a spectrogram.")]
+        AudioTooShort,
+        #[error("The number of frequency bins is zero, cannot process.")]
+        NoFrequencyBins,
+    }
 
     #[must_use]
     #[allow(clippy::many_single_char_names)]
@@ -40,9 +50,9 @@ pub mod core {
     #[allow(clippy::many_single_char_names)]
     pub fn get_icy_blue_color(value: f32) -> [u8; 4] {
         let v = value.clamp(0.0, 1.0);
-        let h = (v * -128.0 + 191.0).rem_euclid(256.0) * (360.0 / 255.0);
-        let s = (v * 128.0 + 127.0).clamp(0.0, 255.0) / 255.0;
-        let l = (v * 255.0 + 0.0).clamp(0.0, 255.0) / 255.0;
+        let h = v.mul_add(-128.0, 191.0).rem_euclid(256.0) * (360.0 / 255.0);
+        let s = v.mul_add(128.0, 127.0).clamp(0.0, 255.0) / 255.0;
+        let l = v.mul_add(255.0, 0.0).clamp(0.0, 255.0) / 255.0;
         let [r, g, b] = hsl_to_rgb(h, s, l);
         [r, g, b, 255]
     }
@@ -107,11 +117,14 @@ pub mod core {
             *v = log_val * gain;
         };
 
-        #[cfg(target_arch = "wasm32")]
-        spectrogram.iter_mut().for_each(mapping_op);
-
-        #[cfg(not(target_arch = "wasm32"))]
-        spectrogram.par_iter_mut().for_each(mapping_op);
+        cfg_if! {
+            if #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-parallel"))] {
+                use rayon::prelude::*;
+                spectrogram.par_iter_mut().for_each(mapping_op);
+            } else {
+                spectrogram.iter_mut().for_each(mapping_op);
+            }
+        }
     }
 
     pub struct RenderableSpectrogram {
@@ -120,14 +133,13 @@ pub mod core {
         pub num_freq_bins: usize,
     }
 
-    #[must_use]
     pub fn process_audio_to_spectrogram(
         audio_data: &[f32],
         sample_rate: u32,
         fft_size: usize,
         hop_length: usize,
         gain: f32,
-    ) -> Option<RenderableSpectrogram> {
+    ) -> Result<RenderableSpectrogram, SpectrogramError> {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(fft_size);
         let max_freq = 20000.0;
@@ -135,16 +147,20 @@ pub mod core {
         let num_freq_bins = (max_freq / freq_resolution).round() as usize;
         let num_freq_bins = num_freq_bins.min(fft_size / 2);
 
+        if num_freq_bins == 0 {
+            return Err(SpectrogramError::NoFrequencyBins);
+        }
+
         let (mut values, max_magnitude, num_time_bins) =
             calculate_spectrogram(audio_data, &*fft, fft_size, hop_length, num_freq_bins);
 
         if num_time_bins == 0 {
-            return None;
+            return Err(SpectrogramError::AudioTooShort);
         }
 
         apply_gain_mapping(&mut values, max_magnitude, gain);
 
-        Some(RenderableSpectrogram {
+        Ok(RenderableSpectrogram {
             values,
             num_time_bins,
             num_freq_bins,
@@ -186,6 +202,25 @@ pub mod core {
         }
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-parallel"))]
+    #[must_use]
+    pub fn render_pixels_parallel(
+        spectrogram: &RenderableSpectrogram,
+        img_width: usize,
+        img_height: usize,
+    ) -> Vec<u8> {
+        use rayon::prelude::*;
+        let mut pixels = vec![0u8; img_width * img_height * 4];
+        pixels
+            .par_chunks_mut(img_width * 4)
+            .enumerate()
+            .for_each(|(y_pixel, row_slice)| {
+                let y_logical = img_height - 1 - y_pixel;
+                render_pixel_row(y_logical, img_width, img_height, spectrogram, row_slice);
+            });
+        pixels
+    }
+
     #[must_use]
     pub fn render_pixels_serial(
         spectrogram: &RenderableSpectrogram,
@@ -209,8 +244,21 @@ pub mod core {
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_api {
-    use super::core;
+    use super::cfg_if;
+    use super::core::{self, SpectrogramError};
     use wasm_bindgen::prelude::*;
+
+    impl From<SpectrogramError> for JsValue {
+        fn from(err: SpectrogramError) -> Self {
+            js_sys::Error::new(&err.to_string()).into()
+        }
+    }
+
+    #[cfg(feature = "wasm-parallel")]
+    #[wasm_bindgen]
+    pub fn init_thread_pool(num_threads: usize) -> js_sys::Promise {
+        wasm_bindgen_rayon::init_thread_pool(num_threads)
+    }
 
     #[wasm_bindgen]
     #[must_use]
@@ -222,23 +270,29 @@ pub mod wasm_api {
         img_width: usize,
         img_height: usize,
         gain: f32,
-    ) -> Vec<u8> {
-        core::process_audio_to_spectrogram(audio_data, sample_rate, fft_size, hop_length, gain)
-            .map_or_else(
-                || vec![0u8; img_width * img_height * 4],
-                |spectrogram_data| {
-                    core::render_pixels_serial(&spectrogram_data, img_width, img_height)
-                },
-            )
+    ) -> Result<Vec<u8>, JsValue> {
+        let spectrogram_data = core::process_audio_to_spectrogram(
+            audio_data,
+            sample_rate,
+            fft_size,
+            hop_length,
+            gain,
+        )?;
+
+        cfg_if! {
+            if #[cfg(feature = "wasm-parallel")] {
+                Ok(core::render_pixels_parallel(&spectrogram_data, img_width, img_height))
+            } else {
+                Ok(core::render_pixels_serial(&spectrogram_data, img_width, img_height))
+            }
+        }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_api {
-    use super::core;
-    use rayon::prelude::*;
+    use super::core::{self, SpectrogramError};
 
-    #[must_use]
     pub fn generate_spectrogram_image_native(
         audio_data: &[f32],
         sample_rate: u32,
@@ -247,29 +301,19 @@ pub mod native_api {
         img_width: usize,
         img_height: usize,
         gain: f32,
-    ) -> Vec<u8> {
-        let Some(spectrogram_data) =
-            core::process_audio_to_spectrogram(audio_data, sample_rate, fft_size, hop_length, gain)
-        else {
-            return vec![0u8; img_width * img_height * 4];
-        };
+    ) -> Result<Vec<u8>, SpectrogramError> {
+        let spectrogram_data = core::process_audio_to_spectrogram(
+            audio_data,
+            sample_rate,
+            fft_size,
+            hop_length,
+            gain,
+        )?;
 
-        let mut pixels = vec![0u8; img_width * img_height * 4];
-
-        pixels
-            .par_chunks_mut(img_width * 4)
-            .enumerate()
-            .for_each(|(y_pixel, row_slice)| {
-                let y_logical = img_height - 1 - y_pixel;
-                core::render_pixel_row(
-                    y_logical,
-                    img_width,
-                    img_height,
-                    &spectrogram_data,
-                    row_slice,
-                );
-            });
-
-        pixels
+        Ok(core::render_pixels_parallel(
+            &spectrogram_data,
+            img_width,
+            img_height,
+        ))
     }
 }

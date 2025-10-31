@@ -1,0 +1,6 @@
+[toolchain]
+# wasm-bindgen-rayon 推荐的版本, 不知道为什么在这个版本上可以工作,
+# 而最新的 nightly 工具链就不行
+channel = "nightly-2024-08-02"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]
