@@ -1,6 +1,6 @@
 #[cfg(target_arch = "wasm32")]
 use cfg_if::cfg_if;
-use rustfft::{num_complex::Complex, Fft, FftPlanner};
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use std::sync::LazyLock;
 use thiserror::Error;
 
@@ -261,7 +261,6 @@ pub mod wasm_api {
     }
 
     #[wasm_bindgen]
-    #[must_use]
     pub fn generate_spectrogram_image(
         audio_data: &[f32],
         sample_rate: u32,
