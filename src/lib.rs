@@ -141,15 +141,13 @@ pub mod core {
         }
     }
 
-    pub fn apply_gain_mapping(spectrogram: &mut [f32], max_magnitude: f32, gain: f32) {
-        let mut mag = max_magnitude;
-        if mag == 0.0 {
-            mag = 1.0;
-        }
+    pub fn apply_gain_mapping(spectrogram: &mut [f32], fft_size: usize, gain: f32) {
+        let n = fft_size as f32;
+        let scale_factor = 9.0 / (2.0 * n).sqrt();
 
         let mapping_op = |v: &mut f32| {
-            let normalized_mag = *v / mag;
-            let log_val = normalized_mag.mul_add(9.0, 1.0).log10();
+            let scaled_mag = *v * scale_factor;
+            let log_val = scaled_mag.mul_add(1.0, 1.0).log10();
             *v = log_val * gain;
         };
 
@@ -187,14 +185,14 @@ pub mod core {
             return Err(SpectrogramError::NoFrequencyBins);
         }
 
-        let (mut values, max_magnitude, num_time_bins) =
+        let (mut values, _max_magnitude, num_time_bins) =
             calculate_spectrogram(audio_data, &*fft, fft_size, hop_length, num_freq_bins);
 
         if num_time_bins == 0 {
             return Err(SpectrogramError::AudioTooShort);
         }
 
-        apply_gain_mapping(&mut values, max_magnitude, gain);
+        apply_gain_mapping(&mut values, fft_size, gain);
 
         Ok(RenderableSpectrogram {
             values,
@@ -209,8 +207,39 @@ pub mod core {
         img_height: usize,
         spectrogram: &RenderableSpectrogram,
         row_buffer: &mut [u8],
+        log_ratio: f32,
     ) {
-        let freq_bins_per_pixel = spectrogram.num_freq_bins as f32 / img_height as f32;
+        let min_bin = 1;
+        let max_bin = spectrogram.num_freq_bins;
+
+        if max_bin <= min_bin {
+            let color = COLOR_LUT[0];
+            for x in 0..img_width {
+                let pixel_start_index = x * 4;
+                row_buffer[pixel_start_index..pixel_start_index + 4].copy_from_slice(&color);
+            }
+            return;
+        }
+
+        let min_bin_f = min_bin as f32;
+        let max_bin_f = max_bin as f32;
+        let scale_log = (max_bin_f / min_bin_f).ln();
+
+        let map_y_to_bin = |y: usize| -> f32 {
+            let pos_rel = y as f32 / img_height as f32;
+            let b_lin = pos_rel.mul_add(max_bin_f - min_bin_f, min_bin_f);
+            let b_log = min_bin_f * (pos_rel * scale_log).exp();
+            log_ratio.mul_add(b_log - b_lin, b_lin)
+        };
+
+        let bin_start_f = map_y_to_bin(y_logical);
+        let bin_end_f = map_y_to_bin(y_logical + 1);
+
+        let bin_start = bin_start_f.floor() as usize;
+        let bin_end = bin_end_f.floor() as usize;
+
+        let bin_start = bin_start.min(spectrogram.num_freq_bins - 1);
+        let bin_end = bin_end.min(spectrogram.num_freq_bins);
 
         for x in 0..img_width {
             let time_index = (x as f32 / img_width as f32 * (spectrogram.num_time_bins - 1) as f32)
@@ -219,13 +248,8 @@ pub mod core {
             let time_bin = &spectrogram.values
                 [time_bin_start_index..time_bin_start_index + spectrogram.num_freq_bins];
 
-            let bin_start = (y_logical as f32 * freq_bins_per_pixel).floor() as usize;
-            let bin_end = ((y_logical + 1) as f32 * freq_bins_per_pixel).floor() as usize;
-            let bin_start = bin_start.min(spectrogram.num_freq_bins - 1);
-            let bin_end = bin_end.min(spectrogram.num_freq_bins);
-
             let final_value = if bin_start >= bin_end {
-                time_bin[bin_start]
+                time_bin[bin_start.min(time_bin.len().saturating_sub(1))]
             } else {
                 let freq_slice = &time_bin[bin_start..bin_end];
                 freq_slice.iter().copied().fold(f32::NEG_INFINITY, f32::max)
@@ -244,6 +268,7 @@ pub mod core {
         spectrogram: &RenderableSpectrogram,
         img_width: usize,
         img_height: usize,
+        log_ratio: f32,
     ) -> Vec<u8> {
         use rayon::prelude::*;
         let mut pixels = vec![0u8; img_width * img_height * 4];
@@ -252,7 +277,14 @@ pub mod core {
             .enumerate()
             .for_each(|(y_pixel, row_slice)| {
                 let y_logical = img_height - 1 - y_pixel;
-                render_pixel_row(y_logical, img_width, img_height, spectrogram, row_slice);
+                render_pixel_row(
+                    y_logical,
+                    img_width,
+                    img_height,
+                    spectrogram,
+                    row_slice,
+                    log_ratio,
+                );
             });
         pixels
     }
@@ -262,6 +294,7 @@ pub mod core {
         spectrogram: &RenderableSpectrogram,
         img_width: usize,
         img_height: usize,
+        log_ratio: f32,
     ) -> Vec<u8> {
         let mut pixels = vec![0u8; img_width * img_height * 4];
 
@@ -272,7 +305,14 @@ pub mod core {
             let row_end_index = row_start_index + img_width * 4;
             let row_buffer = &mut pixels[row_start_index..row_end_index];
 
-            render_pixel_row(y_logical, img_width, img_height, spectrogram, row_buffer);
+            render_pixel_row(
+                y_logical,
+                img_width,
+                img_height,
+                spectrogram,
+                row_buffer,
+                log_ratio,
+            );
         }
         pixels
     }
@@ -314,11 +354,38 @@ pub mod wasm_api {
             gain,
         )?;
 
+        let pos_fref = 0.001;
+        let freq_ref = 1000.0;
+
+        let min_bin = 1;
+        let max_bin = spectrogram_data.num_freq_bins;
+
+        let log_ratio = if max_bin <= min_bin || img_height == 0 {
+            0.0
+        } else {
+            let freq_resolution = sample_rate as f32 / fft_size as f32;
+            let b_fref = (freq_ref / freq_resolution).clamp(min_bin as f32, (max_bin - 1) as f32);
+
+            let min_bin_f = min_bin as f32;
+            let max_bin_f = max_bin as f32;
+
+            let clin = min_bin_f + (max_bin_f - min_bin_f) * pos_fref;
+            let scale_log = (max_bin_f / min_bin_f).ln();
+            let clog = min_bin_f * (pos_fref * scale_log).exp();
+
+            let denominator = clog - clin;
+            if denominator.abs() < 1e-6 {
+                0.5
+            } else {
+                ((b_fref - clin) / denominator).clamp(0.0, 1.0)
+            }
+        };
+
         cfg_if! {
             if #[cfg(feature = "wasm-parallel")] {
-                Ok(core::render_pixels_parallel(&spectrogram_data, img_width, img_height))
+                Ok(core::render_pixels_parallel(&spectrogram_data, img_width, img_height, log_ratio))
             } else {
-                Ok(core::render_pixels_serial(&spectrogram_data, img_width, img_height))
+                Ok(core::render_pixels_serial(&spectrogram_data, img_width, img_height, log_ratio))
             }
         }
     }
@@ -345,10 +412,38 @@ pub mod native_api {
             gain,
         )?;
 
+        let pos_fref = 0.001;
+        let freq_ref = 1000.0;
+
+        let min_bin = 1;
+        let max_bin = spectrogram_data.num_freq_bins;
+
+        let log_ratio = if max_bin <= min_bin || img_height == 0 {
+            0.0
+        } else {
+            let freq_resolution = sample_rate as f32 / fft_size as f32;
+            let b_fref = (freq_ref / freq_resolution).clamp(min_bin as f32, (max_bin - 1) as f32);
+
+            let min_bin_f = min_bin as f32;
+            let max_bin_f = max_bin as f32;
+
+            let clin = (max_bin_f - min_bin_f).mul_add(pos_fref, min_bin_f);
+            let scale_log = (max_bin_f / min_bin_f).ln();
+            let clog = min_bin_f * (pos_fref * scale_log).exp();
+
+            let denominator = clog - clin;
+            if denominator.abs() < 1e-6 {
+                0.5
+            } else {
+                ((b_fref - clin) / denominator).clamp(0.0, 1.0)
+            }
+        };
+
         Ok(core::render_pixels_parallel(
             &spectrogram_data,
             img_width,
             img_height,
+            log_ratio,
         ))
     }
 }
