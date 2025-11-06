@@ -79,30 +79,66 @@ pub mod core {
             return (Vec::new(), 0.0, 0);
         }
 
-        let mut flat_spectrogram = Vec::with_capacity(num_time_bins * num_freq_bins_to_render);
-        let mut max_magnitude = 0.0f32;
-        let mut buffer = vec![Complex::new(0.0, 0.0); fft_size];
-        let mut current_pos = 0;
+        let mut flat_spectrogram = vec![0.0f32; num_time_bins * num_freq_bins_to_render];
 
-        while current_pos + fft_size <= audio_data.len() {
-            let audio_chunk = &audio_data[current_pos..current_pos + fft_size];
-            buffer
-                .iter_mut()
-                .zip(audio_chunk.iter())
-                .for_each(|(c, &s)| {
-                    *c = Complex { re: s, im: 0.0 };
-                });
-            fft.process(&mut buffer);
+        let process_time_bin =
+            |buffer: &mut Vec<Complex<f32>>, (i, time_bin_slice): (usize, &mut [f32])| -> f32 {
+                let current_pos = i * hop_length;
+                let audio_chunk = &audio_data[current_pos..current_pos + fft_size];
 
-            for mag in buffer[0..num_freq_bins_to_render].iter().map(|c| c.norm()) {
-                if mag > max_magnitude {
-                    max_magnitude = mag;
-                }
-                flat_spectrogram.push(mag);
+                buffer
+                    .iter_mut()
+                    .zip(audio_chunk.iter())
+                    .for_each(|(c, &s)| {
+                        *c = Complex { re: s, im: 0.0 };
+                    });
+                fft.process(buffer);
+
+                let mut max_local = 0.0f32;
+                time_bin_slice
+                    .iter_mut()
+                    .zip(buffer[0..num_freq_bins_to_render].iter())
+                    .for_each(|(mag_slot, complex_val)| {
+                        let mag = complex_val.norm();
+                        *mag_slot = mag;
+                        if mag > max_local {
+                            max_local = mag;
+                        }
+                    });
+                max_local
+            };
+
+        cfg_if! {
+            if #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-parallel"))] {
+                use rayon::prelude::*;
+
+                let max_magnitude = flat_spectrogram
+                    .par_chunks_mut(num_freq_bins_to_render)
+                    .enumerate()
+                    .map_init(
+                        || vec![Complex::new(0.0, 0.0); fft_size],
+                        process_time_bin,
+                    )
+                    .reduce(|| 0.0f32, f32::max);
+
+                (flat_spectrogram, max_magnitude, num_time_bins)
+            } else {
+                let mut max_magnitude = 0.0f32;
+                let mut buffer = vec![Complex::new(0.0, 0.0); fft_size];
+
+                flat_spectrogram
+                    .chunks_mut(num_freq_bins_to_render)
+                    .enumerate()
+                    .for_each(|(i, time_bin_slice)| {
+                        let max_local = process_time_bin(&mut buffer, (i, time_bin_slice));
+                        if max_local > max_magnitude {
+                            max_magnitude = max_local;
+                        }
+                    });
+
+                (flat_spectrogram, max_magnitude, num_time_bins)
             }
-            current_pos += hop_length;
         }
-        (flat_spectrogram, max_magnitude, num_time_bins)
     }
 
     pub fn apply_gain_mapping(spectrogram: &mut [f32], max_magnitude: f32, gain: f32) {
