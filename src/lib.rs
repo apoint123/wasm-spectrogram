@@ -450,3 +450,55 @@ pub mod native_api {
         ))
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::native_api;
+    use std::time::Instant;
+
+    const NUM_RUNS: u32 = 100;
+    const SAMPLE_RATE: u32 = 48000;
+    const DURATION_SECONDS: u32 = 5;
+    const FFT_SIZE: usize = 1024;
+    const HOP_LENGTH: usize = 128;
+    const IMG_WIDTH: usize = 1024;
+    const IMG_HEIGHT: usize = 256;
+    const GAIN: f32 = 3.0;
+
+    fn generate_test_audio() -> Vec<f32> {
+        let num_samples = (SAMPLE_RATE * DURATION_SECONDS) as usize;
+        let freq = 440.0;
+        let audio_data: Vec<f32> = (0..num_samples)
+            .map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                (t * freq * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+        audio_data
+    }
+
+    #[test]
+    fn benchmark_generation() {
+        let audio_data = generate_test_audio();
+        let start_time = Instant::now();
+
+        for _ in 0..NUM_RUNS {
+            let _pixels = native_api::generate_spectrogram_image_native(
+                &audio_data,
+                SAMPLE_RATE,
+                FFT_SIZE,
+                HOP_LENGTH,
+                IMG_WIDTH,
+                IMG_HEIGHT,
+                GAIN,
+            )
+            .unwrap();
+        }
+
+        let total_duration = start_time.elapsed();
+        let avg_duration = total_duration / NUM_RUNS;
+
+        println!("Total duration: {total_duration:?}");
+        println!("Average time per run: {avg_duration:?}");
+    }
+}
