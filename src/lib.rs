@@ -6,6 +6,16 @@ pub mod core {
     use realfft::num_complex::Complex;
     use realfft::{RealFftPlanner, RealToComplex};
 
+    #[derive(Debug, Clone, Copy)]
+    pub struct SpectrogramConfig {
+        pub sample_rate: u32,
+        pub fft_size: usize,
+        pub hop_length: usize,
+        pub img_width: usize,
+        pub img_height: usize,
+        pub gain: f32,
+    }
+
     #[derive(Error, Debug, Clone, PartialEq, Eq)]
     pub enum SpectrogramError {
         #[error("Audio data is too short to produce a spectrogram.")]
@@ -345,36 +355,77 @@ pub mod wasm_api {
     }
 
     #[wasm_bindgen]
+    pub struct SpectrogramConfig {
+        pub sample_rate: u32,
+        pub fft_size: usize,
+        pub hop_length: usize,
+        pub img_width: usize,
+        pub img_height: usize,
+        pub gain: f32,
+    }
+
+    #[wasm_bindgen]
+    impl SpectrogramConfig {
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn new(
+            sample_rate: u32,
+            fft_size: usize,
+            hop_length: usize,
+            img_width: usize,
+            img_height: usize,
+            gain: f32,
+        ) -> Self {
+            Self {
+                sample_rate,
+                fft_size,
+                hop_length,
+                img_width,
+                img_height,
+                gain,
+            }
+        }
+    }
+
+    #[wasm_bindgen]
     pub fn generate_spectrogram_image(
         audio_data: &[f32],
-        sample_rate: u32,
-        fft_size: usize,
-        hop_length: usize,
-        img_width: usize,
-        img_height: usize,
-        gain: f32,
         palette: &[u8],
+        config: &SpectrogramConfig,
     ) -> Result<Vec<u8>, JsValue> {
         let spectrogram_data = core::process_audio_to_spectrogram(
             audio_data,
-            sample_rate,
-            fft_size,
-            hop_length,
-            gain,
+            config.sample_rate,
+            config.fft_size,
+            config.hop_length,
+            config.gain,
         )?;
 
         let log_ratio = core::calculate_log_ratio(
-            sample_rate,
-            fft_size,
-            img_height,
+            config.sample_rate,
+            config.fft_size,
+            config.img_height,
             spectrogram_data.num_freq_bins,
         );
 
         cfg_if! {
             if #[cfg(feature = "wasm-parallel")] {
-                Ok(core::render_pixels_parallel(&spectrogram_data, img_width, img_height, log_ratio, palette))
+                Ok(core::render_pixels_parallel(
+                    &spectrogram_data,
+                    config.img_width,
+                    config.img_height,
+                    log_ratio,
+                    palette
+                ))
             } else {
-                Ok(core::render_pixels_serial(&spectrogram_data, img_width, img_height, log_ratio, palette))
+                Ok(core::render_pixels_serial(
+                    &spectrogram_data,
+                    config.img_width,
+                    config.img_height,
+                    log_ratio,
+                    palette
+                ))
             }
         }
     }
@@ -382,37 +433,32 @@ pub mod wasm_api {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_api {
-    use super::core::{self, SpectrogramError};
+    use super::core::{self, SpectrogramConfig, SpectrogramError};
 
     pub fn generate_spectrogram_image_native(
         audio_data: &[f32],
-        sample_rate: u32,
-        fft_size: usize,
-        hop_length: usize,
-        img_width: usize,
-        img_height: usize,
-        gain: f32,
         palette: &[u8],
+        config: SpectrogramConfig,
     ) -> Result<Vec<u8>, SpectrogramError> {
         let spectrogram_data = core::process_audio_to_spectrogram(
             audio_data,
-            sample_rate,
-            fft_size,
-            hop_length,
-            gain,
+            config.sample_rate,
+            config.fft_size,
+            config.hop_length,
+            config.gain,
         )?;
 
         let log_ratio = core::calculate_log_ratio(
-            sample_rate,
-            fft_size,
-            img_height,
+            config.sample_rate,
+            config.fft_size,
+            config.img_height,
             spectrogram_data.num_freq_bins,
         );
 
         Ok(core::render_pixels_parallel(
             &spectrogram_data,
-            img_width,
-            img_height,
+            config.img_width,
+            config.img_height,
             log_ratio,
             palette,
         ))
@@ -421,6 +467,7 @@ pub mod native_api {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use super::core::SpectrogramConfig;
     use super::native_api;
     use std::time::Instant;
 
@@ -458,20 +505,21 @@ mod tests {
             dummy_palette[i * 4 + 3] = 255;
         }
 
+        let config = SpectrogramConfig {
+            sample_rate: SAMPLE_RATE,
+            fft_size: FFT_SIZE,
+            hop_length: HOP_LENGTH,
+            img_width: IMG_WIDTH,
+            img_height: IMG_HEIGHT,
+            gain: GAIN,
+        };
+
         let start_time = Instant::now();
 
         for _ in 0..NUM_RUNS {
-            let _pixels = native_api::generate_spectrogram_image_native(
-                &audio_data,
-                SAMPLE_RATE,
-                FFT_SIZE,
-                HOP_LENGTH,
-                IMG_WIDTH,
-                IMG_HEIGHT,
-                GAIN,
-                &dummy_palette,
-            )
-            .unwrap();
+            let _pixels =
+                native_api::generate_spectrogram_image_native(&audio_data, &dummy_palette, config)
+                    .unwrap();
         }
 
         let total_duration = start_time.elapsed();
