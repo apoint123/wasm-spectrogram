@@ -469,11 +469,9 @@ pub mod native_api {
 mod tests {
     use super::core::SpectrogramConfig;
     use super::native_api;
-    use std::time::Instant;
 
-    const NUM_RUNS: u32 = 100;
     const SAMPLE_RATE: u32 = 48000;
-    const DURATION_SECONDS: u32 = 5;
+    const DURATION_SECONDS: u32 = 1;
     const FFT_SIZE: usize = 1024;
     const HOP_LENGTH: usize = 128;
     const IMG_WIDTH: usize = 1024;
@@ -483,17 +481,16 @@ mod tests {
     fn generate_test_audio() -> Vec<f32> {
         let num_samples = (SAMPLE_RATE * DURATION_SECONDS) as usize;
         let freq = 440.0;
-        let audio_data: Vec<f32> = (0..num_samples)
+        (0..num_samples)
             .map(|i| {
                 let t = i as f32 / SAMPLE_RATE as f32;
                 (t * freq * 2.0 * std::f32::consts::PI).sin() * 0.5
             })
-            .collect();
-        audio_data
+            .collect()
     }
 
     #[test]
-    fn benchmark_generation() {
+    fn test_generation_does_not_panic() {
         let audio_data = generate_test_audio();
 
         let mut dummy_palette = vec![0u8; 256 * 4];
@@ -514,18 +511,10 @@ mod tests {
             gain: GAIN,
         };
 
-        let start_time = Instant::now();
+        let pixels =
+            native_api::generate_spectrogram_image_native(&audio_data, &dummy_palette, config)
+                .unwrap();
 
-        for _ in 0..NUM_RUNS {
-            let _pixels =
-                native_api::generate_spectrogram_image_native(&audio_data, &dummy_palette, config)
-                    .unwrap();
-        }
-
-        let total_duration = start_time.elapsed();
-        let avg_duration = total_duration / NUM_RUNS;
-
-        println!("Total duration: {total_duration:?}");
-        println!("Average time per run: {avg_duration:?}");
+        assert_eq!(pixels.len(), IMG_WIDTH * IMG_HEIGHT * 4);
     }
 }
