@@ -82,7 +82,7 @@ pub mod core {
         let mut flat_spectrogram = vec![0.0f32; num_time_bins * num_freq_bins_to_render];
 
         cfg_if! {
-            if #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-parallel"))] {
+            if #[cfg(feature = "parallel")] {
                 use rayon::prelude::*;
 
                 flat_spectrogram
@@ -121,7 +121,7 @@ pub mod core {
         };
 
         cfg_if! {
-            if #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-parallel"))] {
+            if #[cfg(feature = "parallel")] {
                 use rayon::prelude::*;
                 spectrogram.par_iter_mut().for_each(mapping_op);
             } else {
@@ -240,37 +240,8 @@ pub mod core {
         }
     }
 
-    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-parallel"))]
     #[must_use]
-    pub fn render_pixels_parallel(
-        spectrogram: &RenderableSpectrogram,
-        img_width: usize,
-        img_height: usize,
-        log_ratio: f32,
-        palette: &[u8],
-    ) -> Vec<u8> {
-        use rayon::prelude::*;
-        let mut pixels = vec![0u8; img_width * img_height * 4];
-        pixels
-            .par_chunks_mut(img_width * 4)
-            .enumerate()
-            .for_each(|(y_pixel, row_slice)| {
-                let y_logical = img_height - 1 - y_pixel;
-                render_pixel_row(
-                    y_logical,
-                    img_width,
-                    img_height,
-                    spectrogram,
-                    row_slice,
-                    log_ratio,
-                    palette,
-                );
-            });
-        pixels
-    }
-
-    #[must_use]
-    pub fn render_pixels_serial(
+    pub fn render_pixels(
         spectrogram: &RenderableSpectrogram,
         img_width: usize,
         img_height: usize,
@@ -279,22 +250,42 @@ pub mod core {
     ) -> Vec<u8> {
         let mut pixels = vec![0u8; img_width * img_height * 4];
 
-        for y_pixel in 0..img_height {
-            let y_logical = img_height - 1 - y_pixel;
+        cfg_if! {
+            if #[cfg(feature = "parallel")] {
+                use rayon::prelude::*;
+                pixels
+                    .par_chunks_mut(img_width * 4)
+                    .enumerate()
+                    .for_each(|(y_pixel, row_slice)| {
+                        let y_logical = img_height - 1 - y_pixel;
+                        render_pixel_row(
+                            y_logical,
+                            img_width,
+                            img_height,
+                            spectrogram,
+                            row_slice,
+                            log_ratio,
+                            palette,
+                        );
+                    });
+            } else {
+                for y_pixel in 0..img_height {
+                    let y_logical = img_height - 1 - y_pixel;
+                    let row_start_index = y_pixel * img_width * 4;
+                    let row_end_index = row_start_index + img_width * 4;
+                    let row_buffer = &mut pixels[row_start_index..row_end_index];
 
-            let row_start_index = y_pixel * img_width * 4;
-            let row_end_index = row_start_index + img_width * 4;
-            let row_buffer = &mut pixels[row_start_index..row_end_index];
-
-            render_pixel_row(
-                y_logical,
-                img_width,
-                img_height,
-                spectrogram,
-                row_buffer,
-                log_ratio,
-                palette,
-            );
+                    render_pixel_row(
+                        y_logical,
+                        img_width,
+                        img_height,
+                        spectrogram,
+                        row_buffer,
+                        log_ratio,
+                        palette,
+                    );
+                }
+            }
         }
         pixels
     }
@@ -338,7 +329,6 @@ pub mod core {
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_api {
-    use super::cfg_if;
     use super::core::{self, SpectrogramError};
     use wasm_bindgen::prelude::*;
 
@@ -348,7 +338,7 @@ pub mod wasm_api {
         }
     }
 
-    #[cfg(feature = "wasm-parallel")]
+    #[cfg(feature = "parallel")]
     #[wasm_bindgen]
     pub fn init_thread_pool(num_threads: usize) -> js_sys::Promise {
         wasm_bindgen_rayon::init_thread_pool(num_threads)
@@ -409,25 +399,13 @@ pub mod wasm_api {
             spectrogram_data.num_freq_bins,
         );
 
-        cfg_if! {
-            if #[cfg(feature = "wasm-parallel")] {
-                Ok(core::render_pixels_parallel(
-                    &spectrogram_data,
-                    config.img_width,
-                    config.img_height,
-                    log_ratio,
-                    palette
-                ))
-            } else {
-                Ok(core::render_pixels_serial(
-                    &spectrogram_data,
-                    config.img_width,
-                    config.img_height,
-                    log_ratio,
-                    palette
-                ))
-            }
-        }
+        Ok(core::render_pixels(
+            &spectrogram_data,
+            config.img_width,
+            config.img_height,
+            log_ratio,
+            palette,
+        ))
     }
 }
 
@@ -455,7 +433,7 @@ pub mod native_api {
             spectrogram_data.num_freq_bins,
         );
 
-        Ok(core::render_pixels_parallel(
+        Ok(core::render_pixels(
             &spectrogram_data,
             config.img_width,
             config.img_height,

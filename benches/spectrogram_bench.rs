@@ -1,4 +1,5 @@
 use std::hint::black_box;
+use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use wasm_spectrogram::core::SpectrogramConfig;
@@ -46,6 +47,8 @@ fn bench_generation(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("Spectrogram");
     group.sample_size(10);
+
+    group.warm_up_time(Duration::from_millis(1));
 
     group.bench_function("generate_native", |b| {
         b.iter(|| {
