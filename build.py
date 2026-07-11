@@ -16,13 +16,10 @@ is_cargo_cmd = args.check or args.clippy
 
 if args.check:
     cmd = ["cargo", "check", "--target", "wasm32-unknown-unknown"]
-    action_text = "Checking"
 elif args.clippy:
     cmd = ["cargo", "clippy", "--target", "wasm32-unknown-unknown"]
-    action_text = "Linting (Clippy)"
 else:
-    cmd = ["wasm-pack", "build", "--target", "web"]
-    action_text = "Building"
+    cmd = ["wasm-pack", "build", ".", "--target", "web"]
 
 if args.parallel:
     rustflags = (
