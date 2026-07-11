@@ -62,11 +62,14 @@ pub mod core {
                 real_input.copy_from_slice(audio_chunk);
                 self.fft.process(real_input, complex_output).unwrap();
 
+                #[expect(clippy::imprecise_flops)]
                 time_bin_slice
                     .iter_mut()
                     .zip(complex_output[0..self.num_freq_bins_to_render].iter())
                     .for_each(|(mag_slot, complex_val)| {
-                        *mag_slot = complex_val.norm();
+                        *mag_slot = (complex_val.re * complex_val.re
+                            + complex_val.im * complex_val.im)
+                            .sqrt();
                     });
             }
         }
@@ -114,10 +117,23 @@ pub mod core {
         let n = fft_size as f32;
         let scale_factor = 9.0 / (2.0 * n).sqrt();
 
+        const LOG2_10_INV: f32 = std::f32::consts::LOG10_2;
+
+        const MANTISSA_BITS: u32 = 23;
+        const EXPONENT_BIAS: f32 = 127.0;
+
+        const SIGMA: f32 = 0.058_145;
+
+        const M_FACTOR: f32 = (1 << MANTISSA_BITS) as f32;
+        const MULTIPLIER: f32 = 1.0 / M_FACTOR;
+        const MAGIC_SUB: f32 = M_FACTOR * (EXPONENT_BIAS - SIGMA);
+
         let mapping_op = |v: &mut f32| {
             let scaled_mag = *v * scale_factor;
-            let log_val = scaled_mag.mul_add(1.0, 1.0).log10();
-            *v = log_val * gain;
+            let x = scaled_mag + 1.0;
+            let i = x.to_bits();
+            let fast_log2 = (i as f32 - MAGIC_SUB) * MULTIPLIER;
+            *v = fast_log2 * LOG2_10_INV * gain;
         };
 
         cfg_if! {
@@ -210,10 +226,13 @@ pub mod core {
 
         let bin_start = bin_start.min(spectrogram.num_freq_bins - 1);
         let bin_end = bin_end.min(spectrogram.num_freq_bins);
+        let time_ratio = (spectrogram.num_time_bins - 1) as f32 / img_width as f32;
+        let time_indices: Vec<usize> = (0..img_width)
+            .map(|x| (x as f32).mul_add(time_ratio, 0.5) as usize)
+            .collect();
+        let (pixel_chunks, _remainder) = row_buffer.as_chunks_mut::<4>();
 
-        for x in 0..img_width {
-            let time_index = (x as f32 / img_width as f32 * (spectrogram.num_time_bins - 1) as f32)
-                .round() as usize;
+        for (&time_index, pixel_chunk) in time_indices.iter().zip(pixel_chunks.iter_mut()) {
             let time_bin_start_index = time_index * spectrogram.num_freq_bins;
             let time_bin = &spectrogram.values
                 [time_bin_start_index..time_bin_start_index + spectrogram.num_freq_bins];
@@ -222,20 +241,19 @@ pub mod core {
                 time_bin[bin_start.min(time_bin.len().saturating_sub(1))]
             } else {
                 let freq_slice = &time_bin[bin_start..bin_end];
-                freq_slice.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                freq_slice
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, |a, b| if a > b { a } else { b })
             };
 
-            let color_index = (final_value.clamp(0.0, 1.0) * 255.0).round() as usize;
-
+            let color_index = final_value.clamp(0.0, 1.0).mul_add(255.0, 0.5) as usize;
             let color_start_index = color_index * 4;
-            let pixel_start_index = x * 4;
 
             if color_start_index + 4 <= palette.len() {
-                let color_slice = &palette[color_start_index..color_start_index + 4];
-                row_buffer[pixel_start_index..pixel_start_index + 4].copy_from_slice(color_slice);
+                pixel_chunk.copy_from_slice(&palette[color_start_index..color_start_index + 4]);
             } else {
-                let color_slice = &palette[0..4];
-                row_buffer[pixel_start_index..pixel_start_index + 4].copy_from_slice(color_slice);
+                pixel_chunk.copy_from_slice(&palette[0..4]);
             }
         }
     }
