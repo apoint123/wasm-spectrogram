@@ -1,5 +1,4 @@
 [toolchain]
-# avoid breaking changes
-channel = "nightly-2026-07-11"
+channel = "nightly"
 components = ["rust-src"]
 targets = ["wasm32-unknown-unknown"]
