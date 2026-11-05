@@ -236,9 +236,9 @@ pub mod core {
 
         let map_y_to_bin = |y: usize| -> f32 {
             let pos_rel = y as f32 / img_height as f32;
-            let b_lin = pos_rel.mul_add(max_bin_f - min_bin_f, min_bin_f);
+            let b_lin = pos_rel * (max_bin_f - min_bin_f) + min_bin_f;
             let b_log = min_bin_f * (pos_rel * scale_log).exp();
-            log_ratio.mul_add(b_log - b_lin, b_lin)
+            log_ratio * (b_log - b_lin) + b_lin
         };
 
         let bin_start_f = map_y_to_bin(y_logical);
@@ -267,7 +267,7 @@ pub mod core {
                     .fold(f32::NEG_INFINITY, |a, b| if a > b { a } else { b })
             };
 
-            let color_index = final_value.clamp(0.0, 1.0).mul_add(255.0, 0.5) as usize;
+            let color_index = (final_value.clamp(0.0, 1.0) * 255.0 + 0.5) as usize;
             let color_start_index = color_index * 4;
 
             let color = if color_start_index + 4 <= palette.len() {
@@ -302,7 +302,7 @@ pub mod core {
 
         let time_ratio = (spectrogram.num_time_bins - 1) as f32 / img_width as f32;
         let time_indices: Vec<u32> = (0..img_width)
-            .map(|x| (x as f32).mul_add(time_ratio, 0.5) as u32)
+            .map(|x| ((x as f32) * time_ratio + 0.5) as u32)
             .collect();
         let mut pixels = uninit_vec::<u8>(img_width * img_height * 4);
 
@@ -371,7 +371,7 @@ pub mod core {
         let min_bin_f = min_bin as f32;
         let max_bin_f = max_bin as f32;
 
-        let clin = (max_bin_f - min_bin_f).mul_add(LOG_RATIO_POS_FREF, min_bin_f);
+        let clin = (max_bin_f - min_bin_f) * LOG_RATIO_POS_FREF + min_bin_f;
         let scale_log = (max_bin_f / min_bin_f).ln();
         let clog = min_bin_f * (LOG_RATIO_POS_FREF * scale_log).exp();
 

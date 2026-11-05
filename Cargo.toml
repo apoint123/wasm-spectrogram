@@ -44,6 +44,10 @@ wasm-opt = [
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 
+# wasm 没有 FMA 指令，mul_add 会退化成 libm 的 fmaf 函数调用；
+# 代码的乘加都在热路径上，刻意用普通乘加换取更少的调用开销。
+suboptimal_flops = "allow"
+
 cast_possible_wrap = "allow"
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
