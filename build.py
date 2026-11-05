@@ -1,10 +1,12 @@
+import argparse
 import os
 import subprocess
 import sys
-import argparse
 
 parser = argparse.ArgumentParser(description="Build, check, or lint wasm-spectrogram")
-parser.add_argument("--parallel", action="store_true", help="Enable multi-threading support")
+parser.add_argument(
+    "--parallel", action="store_true", help="Enable multi-threading support"
+)
 
 group = parser.add_mutually_exclusive_group()
 group.add_argument("--check", action="store_true", help="Run 'cargo check'")
@@ -24,7 +26,6 @@ else:
 if args.parallel:
     rustflags = (
         "-C target-feature=+atomics,+bulk-memory,+mutable-globals "
-
         # needed in newer nightly toolchain
         # see https://github.com/rust-lang/rust/pull/147225
         "-C link-arg=--shared-memory "

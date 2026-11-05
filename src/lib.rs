@@ -5,6 +5,7 @@ pub mod core {
     use super::{Error, cfg_if};
     use realfft::num_complex::Complex;
     use realfft::{RealFftPlanner, RealToComplex};
+    use std::mem::MaybeUninit;
 
     #[derive(Debug, Clone, Copy)]
     pub struct SpectrogramConfig {
@@ -22,6 +23,25 @@ pub mod core {
         AudioTooShort,
         #[error("The number of frequency bins is zero, cannot process.")]
         NoFrequencyBins,
+    }
+
+    /// 分配未初始化元素；调用方必须在读取前写入全部元素。
+    fn uninit_vec<T>(len: usize) -> Vec<MaybeUninit<T>> {
+        let mut values = Vec::with_capacity(len);
+        // SAFETY: MaybeUninit<T> 允许未初始化；容量已经足够。
+        unsafe { values.set_len(len) };
+        values
+    }
+
+    /// # Safety
+    /// `values` 的每个元素都必须已经初始化。
+    unsafe fn assume_init_vec<T>(mut values: Vec<MaybeUninit<T>>) -> Vec<T> {
+        let pointer = values.as_mut_ptr().cast::<T>();
+        let length = values.len();
+        let capacity = values.capacity();
+        std::mem::forget(values);
+        // SAFETY: 调用方保证全部元素已初始化；MaybeUninit<T> 与 T 布局相同。
+        unsafe { Vec::from_raw_parts(pointer, length, capacity) }
     }
 
     pub fn calculate_spectrogram(
@@ -52,7 +72,7 @@ pub mod core {
             fn process_time_bin(
                 &self,
                 time_index: usize,
-                time_bin_slice: &mut [f32],
+                time_bin_slice: &mut [MaybeUninit<f32>],
                 real_input: &mut [f32],
                 complex_output: &mut [Complex<f32>],
             ) {
@@ -67,9 +87,10 @@ pub mod core {
                     .iter_mut()
                     .zip(complex_output[0..self.num_freq_bins_to_render].iter())
                     .for_each(|(mag_slot, complex_val)| {
-                        *mag_slot = (complex_val.re * complex_val.re
-                            + complex_val.im * complex_val.im)
-                            .sqrt();
+                        mag_slot.write(
+                            (complex_val.re * complex_val.re + complex_val.im * complex_val.im)
+                                .sqrt(),
+                        );
                     });
             }
         }
@@ -82,7 +103,7 @@ pub mod core {
             num_freq_bins_to_render,
         };
 
-        let mut flat_spectrogram = vec![0.0f32; num_time_bins * num_freq_bins_to_render];
+        let mut flat_spectrogram = uninit_vec::<f32>(num_time_bins * num_freq_bins_to_render);
 
         cfg_if! {
             if #[cfg(feature = "parallel")] {
@@ -110,6 +131,8 @@ pub mod core {
             }
         }
 
+        // SAFETY: process_time_bin 会写满每个 time bin 的所有频点。
+        let flat_spectrogram = unsafe { assume_init_vec(flat_spectrogram) };
         (flat_spectrogram, num_time_bins)
     }
 
@@ -188,21 +211,21 @@ pub mod core {
 
     pub fn render_pixel_row(
         y_logical: usize,
-        img_width: usize,
         img_height: usize,
         spectrogram: &RenderableSpectrogram,
-        row_buffer: &mut [u8],
+        row_buffer: &mut [MaybeUninit<u8>],
         log_ratio: f32,
         palette: &[u8],
+        time_indices: &[u32],
     ) {
         let min_bin = 1;
         let max_bin = spectrogram.num_freq_bins;
 
         if max_bin <= min_bin {
             let color = &palette[0..4];
-            for x in 0..img_width {
-                let pixel_start_index = x * 4;
-                row_buffer[pixel_start_index..pixel_start_index + 4].copy_from_slice(color);
+            let (pixel_chunks, _) = row_buffer.as_chunks_mut::<4>();
+            for pixel_chunk in pixel_chunks {
+                write_color(pixel_chunk, color);
             }
             return;
         }
@@ -226,13 +249,10 @@ pub mod core {
 
         let bin_start = bin_start.min(spectrogram.num_freq_bins - 1);
         let bin_end = bin_end.min(spectrogram.num_freq_bins);
-        let time_ratio = (spectrogram.num_time_bins - 1) as f32 / img_width as f32;
-        let time_indices: Vec<usize> = (0..img_width)
-            .map(|x| (x as f32).mul_add(time_ratio, 0.5) as usize)
-            .collect();
-        let (pixel_chunks, _remainder) = row_buffer.as_chunks_mut::<4>();
+        let (pixel_chunks, _) = row_buffer.as_chunks_mut::<4>();
 
         for (&time_index, pixel_chunk) in time_indices.iter().zip(pixel_chunks.iter_mut()) {
+            let time_index = time_index as usize;
             let time_bin_start_index = time_index * spectrogram.num_freq_bins;
             let time_bin = &spectrogram.values
                 [time_bin_start_index..time_bin_start_index + spectrogram.num_freq_bins];
@@ -250,11 +270,21 @@ pub mod core {
             let color_index = final_value.clamp(0.0, 1.0).mul_add(255.0, 0.5) as usize;
             let color_start_index = color_index * 4;
 
-            if color_start_index + 4 <= palette.len() {
-                pixel_chunk.copy_from_slice(&palette[color_start_index..color_start_index + 4]);
+            let color = if color_start_index + 4 <= palette.len() {
+                &palette[color_start_index..color_start_index + 4]
             } else {
-                pixel_chunk.copy_from_slice(&palette[0..4]);
-            }
+                &palette[0..4]
+            };
+            write_color(pixel_chunk, color);
+        }
+    }
+
+    /// 把 4 字节颜色写入未初始化的像素块。
+    fn write_color(destination: &mut [MaybeUninit<u8>; 4], color: &[u8]) {
+        debug_assert!(color.len() >= 4);
+        // SAFETY: destination 有 4 个可写字节，color 至少有 4 个可读字节。
+        unsafe {
+            std::ptr::copy_nonoverlapping(color.as_ptr(), destination.as_mut_ptr().cast::<u8>(), 4);
         }
     }
 
@@ -266,7 +296,15 @@ pub mod core {
         log_ratio: f32,
         palette: &[u8],
     ) -> Vec<u8> {
-        let mut pixels = vec![0u8; img_width * img_height * 4];
+        if img_width == 0 || img_height == 0 {
+            return Vec::new();
+        }
+
+        let time_ratio = (spectrogram.num_time_bins - 1) as f32 / img_width as f32;
+        let time_indices: Vec<u32> = (0..img_width)
+            .map(|x| (x as f32).mul_add(time_ratio, 0.5) as u32)
+            .collect();
+        let mut pixels = uninit_vec::<u8>(img_width * img_height * 4);
 
         cfg_if! {
             if #[cfg(feature = "parallel")] {
@@ -278,12 +316,12 @@ pub mod core {
                         let y_logical = img_height - 1 - y_pixel;
                         render_pixel_row(
                             y_logical,
-                            img_width,
                             img_height,
                             spectrogram,
                             row_slice,
                             log_ratio,
                             palette,
+                            &time_indices,
                         );
                     });
             } else {
@@ -295,17 +333,18 @@ pub mod core {
 
                     render_pixel_row(
                         y_logical,
-                        img_width,
                         img_height,
                         spectrogram,
                         row_buffer,
                         log_ratio,
                         palette,
+                        &time_indices,
                     );
                 }
             }
         }
-        pixels
+        // SAFETY: render_pixel_row 写满每一行的每个像素的 4 个字节。
+        unsafe { assume_init_vec(pixels) }
     }
 
     const LOG_RATIO_POS_FREF: f32 = 0.001;
