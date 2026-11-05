@@ -29,16 +29,10 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+strip = false
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = [
-    "-O",
-    "--enable-simd",
-    "--enable-bulk-memory",
-    "--enable-nontrapping-float-to-int",
-    "--enable-threads",
-]
+wasm-opt = ["-O4", "-g", "-all"]
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
